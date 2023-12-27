@@ -107,8 +107,7 @@ def visualize(
 
         color, thickness, radius = (0, 255, 0), 2, 2
         kjeky = warpAffinePoint(x_left_eye, y_left_eye, translation_matrix)
-        cv2.circle(translated_img, kjeky, thickness, color,
-                   radius)
+        cv2.circle(translated_img, kjeky, thickness, color, radius)
 
         rotation_matrix = cv2.getRotationMatrix2D((dsize // 2, dsize // 2), angle, 1)
         rotated_img = cv2.warpAffine(translated_img, rotation_matrix, (dsize, dsize), flags=cv2.INTER_CUBIC,
@@ -190,8 +189,8 @@ button.grid(row=1, column=0, sticky="NESW")
 window.mainloop()
 
 # STEP 5: Process the detection result. In this case, visualize it.
-#image_copy = np.copy(image.numpy_view())
-#annotated_image = visualize(image_copy, detection_result)
-#rgb_annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
-#cv2.imshow('lol', rgb_annotated_image)
-#cv2.waitKey(0)
+# image_copy = np.copy(image.numpy_view())
+# annotated_image = visualize(image_copy, detection_result)
+# rgb_annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
+# cv2.imshow('lol', rgb_annotated_image)
+# cv2.waitKey(0)

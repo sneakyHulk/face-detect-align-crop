@@ -7,13 +7,21 @@ import numpy as np
 import os
 import platform
 import cv2
-from PIL import ImageTk
-# from pi_heif import register_heif_opener
+from pi_heif import register_heif_opener
 from dataclasses import dataclass
 from tkinter import ttk
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+from typing import Tuple
+from typing import Union
+import math
 
+base_options = python.BaseOptions(model_asset_path='detector.tflite')
+options = vision.FaceDetectorOptions(base_options=base_options)
+detector = vision.FaceDetector.create_from_options(options)
 
-# register_heif_opener()
+register_heif_opener()
 
 
 def pathtoTkinter(image_path):
@@ -28,6 +36,9 @@ def cv2toTkinter(cv_img: np.ndarray):
 class App(tk.Tk):
     def __init__(self, *args, **kwargs):
         tk.Tk.__init__(self, *args, **kwargs)
+
+        self.output_height = 600
+        self.output_width = 600
 
         # Initialize root window
         self.wm_title("FACE-DETECT-ALIGN-CROP")
@@ -56,57 +67,175 @@ class App(tk.Tk):
         return self.frames[cont]
 
 
-class ProcessingPage(tk.Frame):
-    def __init__(self, parent, image_path):
-        tk.Frame.__init__(self, parent)
-        self.image_path = image_path
+@dataclass
+class CanvasImageSelectedContainer:
+    canvas: tk.Canvas
+    image: PIL.ImageTk.PhotoImage
+    selected: bool
 
-        cv_img = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB)
-        height, width, _ = cv_img.shape
+
+class ProcessingPage(tk.Frame):
+    def update_images(self):
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=self.image)
+        detection_result = detector.detect(image)
+
+        for i, detection in enumerate(detection_result.detections):
+            bbox = detection.bounding_box
+
+            canvas = tk.Canvas(self.images_frame, width=self.controller.output_width - 2,
+                               height=self.controller.output_height - 2, background='white', highlightthickness=1,
+                               highlightbackground="black")
+
+            def _normalized_to_pixel_coordinates(
+                    normalized_x: float, normalized_y: float, image_width: int,
+                    image_height: int) -> Union[None, Tuple[int, int]]:
+                """Converts normalized value pair to pixel coordinates."""
+
+                # Checks if the float value is between 0 and 1.
+                def is_valid_normalized_value(value: float) -> bool:
+                    return (value > 0 or math.isclose(0, value)) and (value < 1 or
+                                                                      math.isclose(1, value))
+
+                if not (is_valid_normalized_value(normalized_x) and
+                        is_valid_normalized_value(normalized_y)):
+                    # TODO: Draw coordinates even if it's outside of the image bounds.
+                    return None
+                x_px = min(math.floor(normalized_x * image_width), image_width - 1)
+                y_px = min(math.floor(normalized_y * image_height), image_height - 1)
+                return x_px, y_px
+
+            def angle_between_2_points(x1, y1, x2, y2):
+                tan = (y2 - y1) / (x2 - x1)
+                return np.degrees(np.arctan(tan))
+
+            def center(x1, y1, x2, y2):
+                return (x1 + x2) // 2, (y1 + y2) // 2
+
+            def distance(x1, y1, x2, y2):
+                return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+
+            def warpAffinePoint(x, y, m):
+                return int(m[0][0] * x + m[0][1] * y + m[0][2]), int(m[1][0] * x + m[1][1] * y + m[1][2])
+
+            height, width, _ = self.image.shape
+
+            x_left_eye, y_left_eye = _normalized_to_pixel_coordinates(detection.keypoints[0].x,
+                                                                      detection.keypoints[0].y,
+                                                                      width, height)
+
+            x_right_eye, y_right_eye = _normalized_to_pixel_coordinates(detection.keypoints[1].x,
+                                                                        detection.keypoints[1].y,
+                                                                        width, height)
+
+            angle = angle_between_2_points(x_left_eye, y_left_eye, x_right_eye, y_right_eye)
+
+            xc, yc = center(x_left_eye, y_left_eye, x_right_eye, y_right_eye)
+
+            bbox = detection.bounding_box
+            xc2, yc2 = center(bbox.origin_x, bbox.origin_y, bbox.origin_x + bbox.width + 1,
+                              bbox.origin_y + bbox.height + 1)
+            dsize = max(width, height) * 2
+            translation_matrix = np.array([
+                [1, 0, dsize // 2 - xc],
+                [0, 1, dsize // 2 - yc]
+            ], dtype=np.float32)
+
+            eye_width = int(distance(x_left_eye, y_left_eye, x_right_eye, y_right_eye))
+            top = int(dsize / 2 - 2 * eye_width)
+            bottom = int(dsize / 2 + 2 * eye_width)
+
+            translated_img = cv2.warpAffine(self.image, translation_matrix, (dsize, dsize), flags=cv2.INTER_CUBIC,
+                                            borderValue=(255, 255, 255), borderMode=cv2.BORDER_CONSTANT)
+            xc, yc = warpAffinePoint(xc, yc, translation_matrix)
+            xc2, yc2 = warpAffinePoint(xc2, yc2, translation_matrix)
+
+            rotation_matrix = cv2.getRotationMatrix2D((dsize // 2, dsize // 2), angle, 1)
+            rotated_img = cv2.warpAffine(translated_img, rotation_matrix, (dsize, dsize), flags=cv2.INTER_CUBIC,
+                                         borderValue=(255, 255, 255))
+            xc, yc = warpAffinePoint(xc, yc, rotation_matrix)
+            xc2, yc2 = warpAffinePoint(xc2, yc2, rotation_matrix)
+
+            cv2.circle(rotated_img, (xc, yc), thickness=2, color=(0, 255, 0), radius=2)
+            cv2.circle(rotated_img, (xc2, yc2), thickness=2, color=(255, 0, 0), radius=2)
+
+            w = self.controller.output_width / bbox.width * 0.5
+            v = self.controller.output_height / bbox.height * 0.5
+
+            img = PIL.Image.fromarray(rotated_img)
+            if w < v:
+                img = PIL.ImageOps.scale(img, w)
+                xc, yc = xc * w, yc * w
+            else:
+                img = PIL.ImageOps.scale(img, v)
+                xc, yc = xc * v, yc * v
+            img = img.crop((xc - self.controller.output_width // 2, yc - self.controller.output_height // 2,
+                            xc + self.controller.output_width // 2, yc + self.controller.output_height // 2))
+            # img = PIL.ImageOps.fit(img, (self.controller.output_width, self.controller.output_height))
+            img = PIL.ImageTk.PhotoImage(img)
+
+            canvas.create_image(0, 0, image=img, anchor=tk.NW)
+
+            def select_image(event):
+                for element in self.data:
+                    if event.widget == element.canvas:
+                        if element.selected:
+                            element.selected = False
+                            element.canvas.configure(highlightbackground="black")
+                        else:
+                            element.selected = True
+                            element.canvas.configure(highlightbackground="red")
+                    else:
+                        element.selected = False
+                        element.canvas.configure(highlightbackground="black")
+
+            canvas.bind("<Button-1>", select_image)
+
+            canvas.grid(row=i, sticky="nsew", padx=1, pady=1)
+            self.data.append(CanvasImageSelectedContainer(canvas, img, False))
+
+        for detection in detection_result.detections:
+            bbox = detection.bounding_box
+
+            start_point = bbox.origin_x, bbox.origin_y
+            end_point = bbox.origin_x + bbox.width, bbox.origin_y + bbox.height
+            cv2.rectangle(self.image, start_point, end_point, color=(255, 0, 0), thickness=1)
+
+    def __init__(self, parent, controller, image_path):
+        tk.Frame.__init__(self, parent)
+        self.controller = controller
+        self.image_path = image_path
+        self.image = cv2.cvtColor(cv2.imread(self.image_path), cv2.COLOR_BGR2RGB)
+        self.data: list[CanvasImageSelectedContainer] = []
 
         self.grid_rowconfigure(0, weight=1)
-        self.grid_rowconfigure(1)
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1, uniform="x")
+        self.grid_columnconfigure(1, minsize=controller.output_width + 20)
 
-        canvas = tk.Canvas(self, background="white")
-        canvas.grid(row=0, column=0, sticky="nsew")
+        self.canvas = tk.Canvas(self, highlightthickness=1, highlightbackground="black")
+        self.canvas.grid(row=0, column=0, padx=2, pady=2, sticky="nswe")
+        self.canvas.bind("<Configure>", self.onCanvasConfigure)
 
-        self.img = PIL.Image.fromarray(cv_img)
-        if width < canvas.winfo_reqwidth() or height < canvas.winfo_reqheight():
-            self.img = PIL.ImageOps.scale(self.img,
-                                          max(width / canvas.winfo_reqwidth(), height / canvas.winfo_reqheight()))
-        self.img = PIL.ImageOps.pad(self.img, (canvas.winfo_reqheight(), canvas.winfo_reqwidth()),
-                                    centering=(0.5, 0.5))
-        self.img = PIL.ImageTk.PhotoImage(image=self.img)
-        canvas.create_image(0, 0, image=self.img,
-                            anchor=tk.NW)
+        self.scroll_frame = ScrollFrame(self)
+        self.images_frame = self.scroll_frame.viewPort
+        self.scroll_frame.grid(row=0, column=1, sticky="nswe")
 
-        # frame = tk.Frame(self)
-        # frame.grid(row=0, column=0, sticky="NESW")
+        self.update_images()
 
-        ## Create a canvas that can fit the above image
-        # canvas = tk.Canvas(frame, scrollregion=(0, 0, width, height), background="white")
-        # horizontal_bar = tk.Scrollbar(frame, orient=tk.HORIZONTAL)
-        # horizontal_bar.pack(side=tk.BOTTOM, fill=tk.X)
-        # horizontal_bar.config(command=canvas.xview)
-        # vertical_bar = tk.Scrollbar(frame, orient=tk.VERTICAL)
-        # vertical_bar.pack(side=tk.RIGHT, fill=tk.Y)
-        # vertical_bar.config(command=canvas.yview)
-        # canvas.config(xscrollcommand=horizontal_bar.set, yscrollcommand=vertical_bar.set)
-        # canvas.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
-
-        # self.img = PIL.ImageTk.PhotoImage(image=PIL.Image.fromarray(cv_img))
-        # canvas.create_image(0, 0, image=self.img, anchor=tk.NW)
+    def onCanvasConfigure(self, event):
+        self.canvas.img = PIL.Image.fromarray(self.image)
+        self.canvas.img = PIL.ImageOps.pad(self.canvas.img, (event.width, event.height),
+                                           centering=(0.5, 0.5), color='white')
+        self.canvas.img = PIL.ImageTk.PhotoImage(image=self.canvas.img)
+        self.canvas.create_image(0, 0, image=self.canvas.img, anchor=tk.NW)
 
 
 class ProcessingPages(tk.Frame):
     def update_images(self, image_paths):
         self.image_paths = image_paths
 
-        # for image_path in image_paths:
-        #    page = ProcessingPage(self, image_path)
-        #    self.frames.append(page)
+        for image_path in image_paths:
+            page = ProcessingPage(self, self.controller, image_path)
+            self.frames.append(page)
 
         self.show_frame(0)
 
@@ -116,29 +245,12 @@ class ProcessingPages(tk.Frame):
         self.image_paths: list = []
         self.frames: list = []
 
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=1)
-
-        canvas = tk.Canvas(self, background="white")
-        canvas.grid(row=0, column=0, sticky="nsew")
+        self.grid_rowconfigure(0, weight=1, uniform="y")
+        self.grid_columnconfigure(0, weight=1, uniform="x")
 
     def show_frame(self, i):
-        cv_img = cv2.cvtColor(cv2.imread(self.image_paths[i]), cv2.COLOR_BGR2RGB)
-
-        canvas = tk.Canvas(self, background="white")
-        canvas.grid(row=0, column=0, sticky="nsew")
-
-        self.img = PIL.Image.fromarray(cv_img)
-        # self.img = PIL.ImageOps.pad(self.img, (1280 // 2, 734),
-        self.img = PIL.ImageOps.pad(self.img, (canvas.winfo_reqwidth(), canvas.winfo_reqheight()),
-                                    centering=(0.5, 0.5))
-
-        self.img = PIL.ImageTk.PhotoImage(image=self.img)
-        canvas.create_image(0, 0, image=self.img,
-                            anchor=tk.NW)
-
-        # frame = self.frames[i]
-        # frame.grid(row=0, column=0, sticky="nsew")
+        frame = self.frames[i]
+        frame.grid(row=0, column=0, sticky="nsew")
         self.controller.wm_title(self.image_paths[i])
 
 
@@ -226,12 +338,12 @@ class SelectImagesPage(tk.Frame):
 
         self.grid_rowconfigure(0)
         self.grid_rowconfigure(1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(2, weight=1, uniform="x")
         self.grid_rowconfigure(2)
-        self.grid_columnconfigure(0, weight=2)
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1, uniform="x")
+        self.grid_columnconfigure(1, weight=1, uniform="x")
 
-        select_pictures_button.grid(row=0, column=0, sticky="nsew")
+        select_pictures_button.grid(row=0, column=0, sticky="nswe")
         select_pictures_directory_button.grid(row=0, column=1, sticky="nsew")
         self.progressbar.grid(row=1, column=0, columnspan=2, sticky="nsew")
         self.scroll_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
@@ -240,6 +352,8 @@ class SelectImagesPage(tk.Frame):
 
     def update_images(self, new_image_files):
         image_paths = list(set([element.path for element in self.data]) | set(new_image_files))
+        self.progressbar['maximum'] = len(image_paths)
+        self.progressbar['value'] = 0
 
         for element in self.data:
             element.canvas.destroy()
@@ -247,11 +361,13 @@ class SelectImagesPage(tk.Frame):
         self.data.clear()
 
         for i, image_path in enumerate(image_paths):
+            self.progressbar['value'] += 1
+            self.progressbar.update_idletasks()
             canvas = tk.Canvas(self.images_frame, width=248, height=248, background='white', highlightthickness=1,
                                highlightbackground="black")
 
             img = PIL.Image.open(image_path)
-            img.thumbnail((248, 248), PIL.Image.Resampling.BILINEAR)
+            img.thumbnail((canvas.winfo_reqwidth(), canvas.winfo_reqheight()), PIL.Image.Resampling.BILINEAR)
             img = PIL.ImageTk.PhotoImage(img)
             canvas.create_image(canvas.winfo_reqwidth() // 2, canvas.winfo_reqheight() // 2, image=img,
                                 anchor=tk.CENTER)
@@ -265,16 +381,17 @@ class SelectImagesPage(tk.Frame):
                         else:
                             element.selected = True
                             element.canvas.configure(highlightbackground="red")
+                        break
 
             canvas.bind("<Button-1>", select_image)
 
-            canvas.grid(row=i // 5, column=i % 5, sticky="nsew", padx=0.5, pady=0.5)
+            canvas.grid(row=i // 5, column=i % 5, sticky="nsew", padx=1, pady=1)
             self.data.append(PathCanvasImageSelectedContainer(image_path, canvas, img, False))
 
 
 class ScrollFrame(tk.Frame):
-    def __init__(self, parent):
-        super().__init__(parent)  # create a frame (self)
+    def __init__(self, parent, *args, **kwargs):
+        super().__init__(parent, *args, **kwargs)  # create a frame (self)
 
         self.canvas = tk.Canvas(self, borderwidth=0)  # place canvas on self
         self.viewPort = tk.Frame(self.canvas)  # place a frame on the canvas, this frame will hold the child widgets
