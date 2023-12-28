@@ -74,7 +74,72 @@ class CanvasImageSelectedContainer:
     selected: bool
 
 
+def face_align_crop(image: PIL.Image.Image, x_start_bbox, y_start_bbox, x_end_bbox, y_end_bbox,
+                    output_width=600, output_height=600, x_eye_left=None, y_eye_left=None, x_eye_right=None,
+                    y_eye_right=None):
+    def angle_between_2_points(x1, y1, x2, y2):
+        tan = (y2 - y1) / (x2 - x1)
+        return np.degrees(np.arctan(tan))
+
+    def center(x1, y1, x2, y2):
+        return (x1 + x2) // 2, (y1 + y2) // 2
+
+    def distance(x1, y1, x2, y2):
+        return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+
+    def warpAffinePoint(x, y, m):
+        return int(m[0][0] * x + m[0][1] * y + m[0][2]), int(m[1][0] * x + m[1][1] * y + m[1][2])
+
+    def cv2toPILRotationMatrix(matrix):
+        return np.linalg.inv(np.concatenate((matrix, np.array([[0, 0, 1]], dtype=np.float32)), axis=0)).flatten()[:6]
+
+    if x_eye_left and y_eye_left and x_eye_right and y_eye_right:
+        xc, yc = center(x_eye_left, y_eye_left, x_eye_right, y_eye_right)
+    else:
+        xc, yc = center(x_start_bbox, y_start_bbox, x_end_bbox, y_end_bbox)
+
+    dsize = max(image.width, image.height) * 2
+    translation_matrix = np.array([
+        [1, 0, dsize // 2 - xc],
+        [0, 1, dsize // 2 - yc],
+    ], dtype=np.float32)
+
+    # image = np.array(image)
+    # image = cv2.warpAffine(image, translation_matrix, (dsize, dsize), flags=cv2.INTER_CUBIC,
+    #                       borderValue=(255, 255, 255), borderMode=cv2.BORDER_CONSTANT)
+    image = image.transform((dsize, dsize), PIL.Image.Transform.AFFINE, cv2toPILRotationMatrix(translation_matrix),
+                            PIL.Image.BICUBIC)
+    xc, yc = warpAffinePoint(xc, yc, translation_matrix)
+
+    if x_eye_left and y_eye_left and x_eye_right and y_eye_right:
+        angle = angle_between_2_points(x_eye_left, y_eye_left, x_eye_right, y_eye_right)
+        rotation_matrix = cv2.getRotationMatrix2D((dsize // 2, dsize // 2), angle, 1)
+
+        # image = cv2.warpAffine(image, rotation_matrix, (dsize, dsize), flags=cv2.INTER_CUBIC,
+        #                       borderValue=(255, 255, 255))
+        image = image.transform((dsize, dsize), PIL.Image.Transform.AFFINE, cv2toPILRotationMatrix(rotation_matrix),
+                                PIL.Image.BICUBIC)
+
+        xc, yc = warpAffinePoint(xc, yc, rotation_matrix)
+
+    w = output_width / abs(x_end_bbox - x_start_bbox) * 0.5
+    v = output_height / abs(y_end_bbox - y_start_bbox) * 0.5
+
+    # image = PIL.Image.fromarray(image)
+    if w < v:
+        image = PIL.ImageOps.scale(image, w)
+        xc, yc = xc * w, yc * w
+    else:
+        image = PIL.ImageOps.scale(image, v)
+        xc, yc = xc * v, yc * v
+    image = image.crop((xc - output_width // 2, yc - output_height // 2,
+                        xc + output_width // 2, yc + output_height // 2))
+
+    return image
+
+
 class ProcessingPage(tk.Frame):
+
     def update_images(self):
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=self.image)
         detection_result = detector.detect(image)
@@ -104,74 +169,46 @@ class ProcessingPage(tk.Frame):
                 y_px = min(math.floor(normalized_y * image_height), image_height - 1)
                 return x_px, y_px
 
-            def angle_between_2_points(x1, y1, x2, y2):
-                tan = (y2 - y1) / (x2 - x1)
-                return np.degrees(np.arctan(tan))
-
-            def center(x1, y1, x2, y2):
-                return (x1 + x2) // 2, (y1 + y2) // 2
-
-            def distance(x1, y1, x2, y2):
-                return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
-
-            def warpAffinePoint(x, y, m):
-                return int(m[0][0] * x + m[0][1] * y + m[0][2]), int(m[1][0] * x + m[1][1] * y + m[1][2])
-
             height, width, _ = self.image.shape
 
-            x_left_eye, y_left_eye = _normalized_to_pixel_coordinates(detection.keypoints[0].x,
+            x_eye_left, y_eye_left = _normalized_to_pixel_coordinates(detection.keypoints[0].x,
                                                                       detection.keypoints[0].y,
                                                                       width, height)
 
-            x_right_eye, y_right_eye = _normalized_to_pixel_coordinates(detection.keypoints[1].x,
+            x_eye_right, y_eye_right = _normalized_to_pixel_coordinates(detection.keypoints[1].x,
                                                                         detection.keypoints[1].y,
                                                                         width, height)
 
-            angle = angle_between_2_points(x_left_eye, y_left_eye, x_right_eye, y_right_eye)
+            image = face_align_crop(PIL.Image.fromarray(self.image), bbox.origin_x, bbox.origin_y,
+                                    bbox.origin_x + bbox.width + 1, bbox.origin_y + bbox.height + 1,
+                                    self.controller.output_width, self.controller.output_height, x_eye_left, y_eye_left,
+                                    x_eye_right, y_eye_right)
 
-            xc, yc = center(x_left_eye, y_left_eye, x_right_eye, y_right_eye)
-
-            bbox = detection.bounding_box
-            xc2, yc2 = center(bbox.origin_x, bbox.origin_y, bbox.origin_x + bbox.width + 1,
-                              bbox.origin_y + bbox.height + 1)
-            dsize = max(width, height) * 2
-            translation_matrix = np.array([
-                [1, 0, dsize // 2 - xc],
-                [0, 1, dsize // 2 - yc]
-            ], dtype=np.float32)
-
-            eye_width = int(distance(x_left_eye, y_left_eye, x_right_eye, y_right_eye))
-            top = int(dsize / 2 - 2 * eye_width)
-            bottom = int(dsize / 2 + 2 * eye_width)
-
-            translated_img = cv2.warpAffine(self.image, translation_matrix, (dsize, dsize), flags=cv2.INTER_CUBIC,
-                                            borderValue=(255, 255, 255), borderMode=cv2.BORDER_CONSTANT)
-            xc, yc = warpAffinePoint(xc, yc, translation_matrix)
-            xc2, yc2 = warpAffinePoint(xc2, yc2, translation_matrix)
-
-            rotation_matrix = cv2.getRotationMatrix2D((dsize // 2, dsize // 2), angle, 1)
-            rotated_img = cv2.warpAffine(translated_img, rotation_matrix, (dsize, dsize), flags=cv2.INTER_CUBIC,
-                                         borderValue=(255, 255, 255))
-            xc, yc = warpAffinePoint(xc, yc, rotation_matrix)
-            xc2, yc2 = warpAffinePoint(xc2, yc2, rotation_matrix)
-
-            cv2.circle(rotated_img, (xc, yc), thickness=2, color=(0, 255, 0), radius=2)
-            cv2.circle(rotated_img, (xc2, yc2), thickness=2, color=(255, 0, 0), radius=2)
-
-            w = self.controller.output_width / bbox.width * 0.5
-            v = self.controller.output_height / bbox.height * 0.5
-
-            img = PIL.Image.fromarray(rotated_img)
-            if w < v:
-                img = PIL.ImageOps.scale(img, w)
-                xc, yc = xc * w, yc * w
-            else:
-                img = PIL.ImageOps.scale(img, v)
-                xc, yc = xc * v, yc * v
-            img = img.crop((xc - self.controller.output_width // 2, yc - self.controller.output_height // 2,
-                            xc + self.controller.output_width // 2, yc + self.controller.output_height // 2))
-            # img = PIL.ImageOps.fit(img, (self.controller.output_width, self.controller.output_height))
-            img = PIL.ImageTk.PhotoImage(img)
+            # angle = angle_between_2_points(x_left_eye, y_left_eye, x_right_eye, y_right_eye)
+            #
+            # xc, yc = center(x_left_eye, y_left_eye, x_right_eye, y_right_eye)
+            #
+            # bbox = detection.bounding_box
+            # xc2, yc2 = center(bbox.origin_x, bbox.origin_y, bbox.origin_x + bbox.width + 1,
+            #                  bbox.origin_y + bbox.height + 1)
+            #
+            ## eye_width = int(distance(x_left_eye, y_left_eye, x_right_eye, y_right_eye))
+            ## top = int(dsize / 2 - 2 * eye_width)
+            ## bottom = int(dsize / 2 + 2 * eye_width)
+            #
+            # xc2, yc2 = warpAffinePoint(xc2, yc2, translation_matrix)
+            #
+            # xc2, yc2 = warpAffinePoint(xc2, yc2, rotation_matrix)
+            #
+            # cv2.circle(rotated_img, (xc2, yc2), thickness=2, color=(255, 0, 0), radius=2)
+            #
+            # w = self.controller.output_width / bbox.width * 0.5
+            # v = self.controller.output_height / bbox.height * 0.5
+            #
+            # img = PIL.Image.fromarray(rotated_img)
+            #
+            ## img = PIL.ImageOps.fit(img, (self.controller.output_width, self.controller.output_height))
+            img = PIL.ImageTk.PhotoImage(image)
 
             canvas.create_image(0, 0, image=img, anchor=tk.NW)
 
