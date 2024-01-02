@@ -22,15 +22,6 @@ import multiprocessing.queues
 register_heif_opener()
 
 
-def pathtoTkinter(image_path):
-    cv_img = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB)
-    return cv2toTkinter(cv_img)
-
-
-def cv2toTkinter(cv_img: np.ndarray):
-    return PIL.ImageTk.PhotoImage(image=PIL.Image.fromarray(cv_img))
-
-
 class App(tk.Tk):
     def __init__(self, *args, **kwargs):
         tk.Tk.__init__(self, *args, **kwargs)
