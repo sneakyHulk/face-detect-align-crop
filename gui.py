@@ -1,25 +1,23 @@
 import tkinter as tk
 from tkinter import filedialog as fd
+from typing import Tuple, Dict
+from pathlib import Path
 import PIL.Image
 import PIL.ImageTk
 import PIL.ImageOps
+import PIL.ImageDraw
 import numpy as np
 import os
 import platform
 import cv2
-from pi_heif import register_heif_opener
+from pillow_heif import register_heif_opener
 from dataclasses import dataclass
 from tkinter import ttk
-import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
-from typing import Tuple
-from typing import Union
+import multiprocessing
 import math
-
-base_options = python.BaseOptions(model_asset_path='detector.tflite')
-options = vision.FaceDetectorOptions(base_options=base_options)
-detector = vision.FaceDetector.create_from_options(options)
+from solutions import use_hog, use_mediapipe, use_cnn, face_align_crop
+import multiprocessing.connection
+import multiprocessing.queues
 
 register_heif_opener()
 
@@ -36,7 +34,6 @@ def cv2toTkinter(cv_img: np.ndarray):
 class App(tk.Tk):
     def __init__(self, *args, **kwargs):
         tk.Tk.__init__(self, *args, **kwargs)
-
         self.output_height = 600
         self.output_width = 600
 
@@ -44,18 +41,22 @@ class App(tk.Tk):
         self.wm_title("FACE-DETECT-ALIGN-CROP")
         # self.resizable(False, False)
         self.geometry('1280x734')
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(0)
+        self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
+        self.progressbar = ttk.Progressbar(self, orient='horizontal', mode='determinate')
+        self.progressbar.grid(row=0, column=0, sticky="nsew")
+
         # Initialize container frame which can be switched
-        container = tk.Frame(self)
-        container.grid(row=0, column=0, sticky="nsew")
-        container.grid_rowconfigure(0, weight=1)
-        container.grid_columnconfigure(0, weight=1)
+        self.container = tk.Frame(self)
+        self.container.grid(row=1, column=0, sticky="nsew")
+        self.container.grid_rowconfigure(0, weight=1)
+        self.container.grid_columnconfigure(0, weight=1)
 
         self.frames = {}
-        for Frame in (SelectImagesPage, ProcessingPages):
-            self.frames[Frame] = Frame(container, self)
+        for Frame in (SelectImagesPage, ProcessingPages, EndPage):
+            self.frames[Frame] = Frame(self.container, self)
             self.frames[Frame].grid(row=0, column=0, sticky="nsew")
 
         self.show_frame(SelectImagesPage)
@@ -70,181 +71,95 @@ class App(tk.Tk):
 @dataclass
 class CanvasImageSelectedContainer:
     canvas: tk.Canvas
-    image: PIL.ImageTk.PhotoImage
+    image: PIL.Image
     selected: bool
 
 
-def face_align_crop(image: PIL.Image.Image, x_start_bbox, y_start_bbox, x_end_bbox, y_end_bbox,
-                    output_width=600, output_height=600, x_eye_left=None, y_eye_left=None, x_eye_right=None,
-                    y_eye_right=None):
-    def angle_between_2_points(x1, y1, x2, y2):
-        tan = (y2 - y1) / (x2 - x1)
-        return np.degrees(np.arctan(tan))
+class EndPage(tk.Frame):
+    def __init__(self, parent, controller):
+        tk.Frame.__init__(self, parent)
+        self.controller = controller
+        self.label: tk.Label = tk.Label(self, text="End")
+        self.label.pack(fill="both")
 
-    def center(x1, y1, x2, y2):
-        return (x1 + x2) // 2, (y1 + y2) // 2
+        def restart():
+            self.controller.show_frame(SelectImagesPage)
 
-    def distance(x1, y1, x2, y2):
-        return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
-
-    def warpAffinePoint(x, y, m):
-        return int(m[0][0] * x + m[0][1] * y + m[0][2]), int(m[1][0] * x + m[1][1] * y + m[1][2])
-
-    def cv2toPILRotationMatrix(matrix):
-        return np.linalg.inv(np.concatenate((matrix, np.array([[0, 0, 1]], dtype=np.float32)), axis=0)).flatten()[:6]
-
-    if x_eye_left and y_eye_left and x_eye_right and y_eye_right:
-        xc, yc = center(x_eye_left, y_eye_left, x_eye_right, y_eye_right)
-    else:
-        xc, yc = center(x_start_bbox, y_start_bbox, x_end_bbox, y_end_bbox)
-
-    dsize = max(image.width, image.height) * 2
-    translation_matrix = np.array([
-        [1, 0, dsize // 2 - xc],
-        [0, 1, dsize // 2 - yc],
-    ], dtype=np.float32)
-
-    # image = np.array(image)
-    # image = cv2.warpAffine(image, translation_matrix, (dsize, dsize), flags=cv2.INTER_CUBIC,
-    #                       borderValue=(255, 255, 255), borderMode=cv2.BORDER_CONSTANT)
-    image = image.transform((dsize, dsize), PIL.Image.Transform.AFFINE, cv2toPILRotationMatrix(translation_matrix),
-                            PIL.Image.BICUBIC)
-    xc, yc = warpAffinePoint(xc, yc, translation_matrix)
-
-    if x_eye_left and y_eye_left and x_eye_right and y_eye_right:
-        angle = angle_between_2_points(x_eye_left, y_eye_left, x_eye_right, y_eye_right)
-        rotation_matrix = cv2.getRotationMatrix2D((dsize // 2, dsize // 2), angle, 1)
-
-        # image = cv2.warpAffine(image, rotation_matrix, (dsize, dsize), flags=cv2.INTER_CUBIC,
-        #                       borderValue=(255, 255, 255))
-        image = image.transform((dsize, dsize), PIL.Image.Transform.AFFINE, cv2toPILRotationMatrix(rotation_matrix),
-                                PIL.Image.BICUBIC)
-
-        xc, yc = warpAffinePoint(xc, yc, rotation_matrix)
-
-    w = output_width / abs(x_end_bbox - x_start_bbox) * 0.5
-    v = output_height / abs(y_end_bbox - y_start_bbox) * 0.5
-
-    # image = PIL.Image.fromarray(image)
-    if w < v:
-        image = PIL.ImageOps.scale(image, w)
-        xc, yc = xc * w, yc * w
-    else:
-        image = PIL.ImageOps.scale(image, v)
-        xc, yc = xc * v, yc * v
-    image = image.crop((xc - output_width // 2, yc - output_height // 2,
-                        xc + output_width // 2, yc + output_height // 2))
-
-    return image
+        self.button: tk.Button = tk.Button(self, text="Restart", command=restart)
+        self.button.pack(fill="both")
 
 
 class ProcessingPage(tk.Frame):
-
-    def update_images(self):
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=self.image)
-        detection_result = detector.detect(image)
-
-        for i, detection in enumerate(detection_result.detections):
-            bbox = detection.bounding_box
-
+    def show(self):
+        detection_data = self.parent_conn.recv()
+        self.process.join()
+        for detection_image, x_start_bbox, y_start_bbox, x_end_bbox, y_end_bbox in detection_data:
             canvas = tk.Canvas(self.images_frame, width=self.controller.output_width - 2,
                                height=self.controller.output_height - 2, background='white', highlightthickness=1,
                                highlightbackground="black")
 
-            def _normalized_to_pixel_coordinates(
-                    normalized_x: float, normalized_y: float, image_width: int,
-                    image_height: int) -> Union[None, Tuple[int, int]]:
-                """Converts normalized value pair to pixel coordinates."""
+            canvas.img = PIL.ImageTk.PhotoImage(detection_image)
+            canvas.create_image(0, 0, image=canvas.img, anchor=tk.NW)
 
-                # Checks if the float value is between 0 and 1.
-                def is_valid_normalized_value(value: float) -> bool:
-                    return (value > 0 or math.isclose(0, value)) and (value < 1 or
-                                                                      math.isclose(1, value))
-
-                if not (is_valid_normalized_value(normalized_x) and
-                        is_valid_normalized_value(normalized_y)):
-                    # TODO: Draw coordinates even if it's outside of the image bounds.
-                    return None
-                x_px = min(math.floor(normalized_x * image_width), image_width - 1)
-                y_px = min(math.floor(normalized_y * image_height), image_height - 1)
-                return x_px, y_px
-
-            height, width, _ = self.image.shape
-
-            x_eye_left, y_eye_left = _normalized_to_pixel_coordinates(detection.keypoints[0].x,
-                                                                      detection.keypoints[0].y,
-                                                                      width, height)
-
-            x_eye_right, y_eye_right = _normalized_to_pixel_coordinates(detection.keypoints[1].x,
-                                                                        detection.keypoints[1].y,
-                                                                        width, height)
-
-            image = face_align_crop(PIL.Image.fromarray(self.image), bbox.origin_x, bbox.origin_y,
-                                    bbox.origin_x + bbox.width + 1, bbox.origin_y + bbox.height + 1,
-                                    self.controller.output_width, self.controller.output_height, x_eye_left, y_eye_left,
-                                    x_eye_right, y_eye_right)
-
-            # angle = angle_between_2_points(x_left_eye, y_left_eye, x_right_eye, y_right_eye)
-            #
-            # xc, yc = center(x_left_eye, y_left_eye, x_right_eye, y_right_eye)
-            #
-            # bbox = detection.bounding_box
-            # xc2, yc2 = center(bbox.origin_x, bbox.origin_y, bbox.origin_x + bbox.width + 1,
-            #                  bbox.origin_y + bbox.height + 1)
-            #
-            ## eye_width = int(distance(x_left_eye, y_left_eye, x_right_eye, y_right_eye))
-            ## top = int(dsize / 2 - 2 * eye_width)
-            ## bottom = int(dsize / 2 + 2 * eye_width)
-            #
-            # xc2, yc2 = warpAffinePoint(xc2, yc2, translation_matrix)
-            #
-            # xc2, yc2 = warpAffinePoint(xc2, yc2, rotation_matrix)
-            #
-            # cv2.circle(rotated_img, (xc2, yc2), thickness=2, color=(255, 0, 0), radius=2)
-            #
-            # w = self.controller.output_width / bbox.width * 0.5
-            # v = self.controller.output_height / bbox.height * 0.5
-            #
-            # img = PIL.Image.fromarray(rotated_img)
-            #
-            ## img = PIL.ImageOps.fit(img, (self.controller.output_width, self.controller.output_height))
-            img = PIL.ImageTk.PhotoImage(image)
-
-            canvas.create_image(0, 0, image=img, anchor=tk.NW)
-
-            def select_image(event):
+            def select_image(selection_event):
                 for element in self.data:
-                    if event.widget == element.canvas:
+                    if selection_event.widget == element.canvas:
                         if element.selected:
                             element.selected = False
                             element.canvas.configure(highlightbackground="black")
                         else:
                             element.selected = True
-                            element.canvas.configure(highlightbackground="red")
+                            element.canvas.configure(highlightbackground="green")
                     else:
                         element.selected = False
                         element.canvas.configure(highlightbackground="black")
 
             canvas.bind("<Button-1>", select_image)
 
-            canvas.grid(row=i, sticky="nsew", padx=1, pady=1)
-            self.data.append(CanvasImageSelectedContainer(canvas, img, False))
+            canvas.grid(row=len(self.data), sticky="nsew", padx=1, pady=1)
+            if not len(self.data):
+                canvas.configure(highlightbackground="green")
+            self.data.append(CanvasImageSelectedContainer(canvas, detection_image, False if len(self.data) else True))
+            draw_img = PIL.ImageDraw.Draw(self.draw_image)
+            draw_img.rectangle(((x_start_bbox, y_start_bbox), (x_end_bbox, y_end_bbox)), outline='red',
+                               width=(self.draw_image.width + self.draw_image.height) // 1000 + 1)
 
-        for detection in detection_result.detections:
-            bbox = detection.bounding_box
+        @dataclass
+        class Event:
+            width: int
+            height: int
 
-            start_point = bbox.origin_x, bbox.origin_y
-            end_point = bbox.origin_x + bbox.width, bbox.origin_y + bbox.height
-            cv2.rectangle(self.image, start_point, end_point, color=(255, 0, 0), thickness=1)
+        event = Event(width=self.canvas.winfo_width(), height=self.canvas.winfo_height())
+        self.onCanvasConfigure(event)
+
+    @staticmethod
+    def process_image(func, image: PIL.Image, output_width: int, output_height: int,
+                      connection: multiprocessing.connection.Connection):
+        print("Processing image...")
+        results = [(face_align_crop(image, output_width, output_height, *args), args[0], args[1], args[2], args[3])
+                   for args in func(image)]
+        print(results)
+        connection.send(results)
+        connection.close()
 
     def __init__(self, parent, controller, image_path):
         tk.Frame.__init__(self, parent)
+        self.parent = parent
         self.controller = controller
         self.image_path = image_path
-        self.image = cv2.cvtColor(cv2.imread(self.image_path), cv2.COLOR_BGR2RGB)
+        self.image = PIL.Image.open(self.image_path)
+        self.draw_image = self.image.copy()
+
+        self.parent_conn, self.child_conn = multiprocessing.Pipe()
+        self.process = multiprocessing.Process(target=self.process_image, args=(
+            use_mediapipe, self.image, self.controller.output_width, self.controller.output_height, self.child_conn),
+                                               daemon=True)
+        self.process.start()
+
         self.data: list[CanvasImageSelectedContainer] = []
 
         self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1)
         self.grid_columnconfigure(0, weight=1, uniform="x")
         self.grid_columnconfigure(1, minsize=controller.output_width + 20)
 
@@ -256,39 +171,122 @@ class ProcessingPage(tk.Frame):
         self.images_frame = self.scroll_frame.viewPort
         self.scroll_frame.grid(row=0, column=1, sticky="nswe")
 
-        self.update_images()
+        self.frame_buttons = tk.Frame(self)
+        self.frame_buttons.grid_rowconfigure(0)
+        self.frame_buttons.grid_columnconfigure(0, weight=1, uniform="x")
+        self.frame_buttons.grid_columnconfigure(1, weight=1, uniform="x")
+        self.frame_buttons.grid_columnconfigure(2, weight=1, uniform="x")
+        self.frame_buttons.grid_columnconfigure(3, weight=1, uniform="x")
+
+        print(self.image_path)
+
+        self.button_mediapipe = tk.Button(self.frame_buttons, text="Use mediapipe")
+        self.button_mediapipe.grid(row=0, column=0, sticky="nswe")
+        self.button_mediapipe["state"] = "disabled"
+
+        def hog_click():
+            self.button_hog["state"] = "disabled"
+            self.button_hog.update()
+
+            self.parent_conn, self.child_conn = multiprocessing.Pipe()
+            self.process = multiprocessing.Process(target=self.process_image, args=(
+                use_hog, self.image, self.controller.output_width, self.controller.output_height,
+                self.child_conn), daemon=True)
+            self.process.start()
+
+            self.parent.next_frame()
+
+        self.button_hog = tk.Button(self.frame_buttons, text="Use dlib hog", command=hog_click)
+        self.button_hog.grid(row=0, column=1, sticky="nswe")
+
+        def cnn_click():
+            self.button_cnn["state"] = "disabled"
+            self.button_cnn.update()
+
+            self.parent_conn, self.child_conn = multiprocessing.Pipe()
+            self.process = multiprocessing.Process(target=self.process_image, args=(
+                use_cnn, self.image, self.controller.output_width, self.controller.output_height,
+                self.child_conn), daemon=True)
+            self.process.start()
+
+            self.parent.next_frame()
+
+        self.button_cnn = tk.Button(self.frame_buttons, text="Use dlib cnn", command=cnn_click)
+        self.button_cnn.grid(row=0, column=2, sticky="nswe")
+
+        def save_click():
+            self.button_save["state"] = "disabled"
+            self.button_save.update()
+
+            for container in self.data:
+                if container.selected:
+                    desktop = os.path.normpath(os.path.expanduser("~/Desktop"))
+                    os.makedirs(os.path.join(desktop, "ready"), exist_ok=True)
+                    container.image.save(os.path.join(desktop, "ready", Path(self.image_path).stem + str(".png")))
+                    break
+
+            self.parent.destroy_frame()
+
+        self.button_save = tk.Button(self.frame_buttons, text="save selection", command=save_click)
+        self.button_save.grid(row=0, column=3, sticky="nswe")
+
+        self.frame_buttons.grid(row=1, column=0, columnspan=2, sticky="nswe")
 
     def onCanvasConfigure(self, event):
-        self.canvas.img = PIL.Image.fromarray(self.image)
-        self.canvas.img = PIL.ImageOps.pad(self.canvas.img, (event.width, event.height),
+        self.canvas.img = PIL.ImageOps.pad(self.draw_image, (event.width, event.height),
                                            centering=(0.5, 0.5), color='white')
         self.canvas.img = PIL.ImageTk.PhotoImage(image=self.canvas.img)
         self.canvas.create_image(0, 0, image=self.canvas.img, anchor=tk.NW)
 
 
+@dataclass
+class FramePathContainer:
+    frame: ProcessingPage
+    image_path: str
+
+
 class ProcessingPages(tk.Frame):
     def update_images(self, image_paths):
-        self.image_paths = image_paths
+        self.controller.progressbar['maximum'] = len(image_paths)
+        self.controller.progressbar['value'] = 0
 
         for image_path in image_paths:
+            self.controller.progressbar['value'] += 1
+            self.controller.progressbar.update()
             page = ProcessingPage(self, self.controller, image_path)
-            self.frames.append(page)
+            self.frames.append(FramePathContainer(page, image_path))
 
-        self.show_frame(0)
+        self.show_frame()
 
     def __init__(self, parent, controller):
         tk.Frame.__init__(self, parent)
         self.controller = controller
-        self.image_paths: list = []
-        self.frames: list = []
+        self.frames: list[FramePathContainer] = []
+        self.current_frame = 0
 
         self.grid_rowconfigure(0, weight=1, uniform="y")
         self.grid_columnconfigure(0, weight=1, uniform="x")
 
-    def show_frame(self, i):
-        frame = self.frames[i]
-        frame.grid(row=0, column=0, sticky="nsew")
-        self.controller.wm_title(self.image_paths[i])
+    def show_frame(self):
+        frame = self.frames[self.current_frame]
+        frame.frame.grid(row=0, column=0, sticky="nsew")
+        self.controller.wm_title(frame.image_path)
+        frame.frame.show()
+        frame.frame.tkraise()
+        self.update()
+
+    def destroy_frame(self):
+        self.frames[self.current_frame].frame.destroy()
+        self.frames.pop(self.current_frame)
+        if len(self.frames):
+            self.current_frame = self.current_frame % len(self.frames)
+            self.show_frame()
+        else:
+            self.controller.show_frame(EndPage)
+
+    def next_frame(self):
+        self.current_frame = (self.current_frame + 1) % len(self.frames)
+        self.show_frame()
 
 
 @dataclass
@@ -302,7 +300,7 @@ class PathCanvasImageSelectedContainer:
 class SelectImagesPage(tk.Frame):
     def __init__(self, parent, controller):
         tk.Frame.__init__(self, parent)
-        self.progressbar = ttk.Progressbar(self, orient='horizontal', mode='determinate')
+        self.controller = controller
 
         self.data: list[PathCanvasImageSelectedContainer] = []
         self.scroll_frame = ScrollFrame(self)
@@ -315,7 +313,6 @@ class SelectImagesPage(tk.Frame):
                 ('PNG FILES', '*.png'),
                 ('HEIF FILES', '*.heif'),
                 ('HEIF FILES', '*.heic'),
-                ('PDF FILES', '*.pdf'),
                 ('All files', '*.*')
             )
 
@@ -337,6 +334,7 @@ class SelectImagesPage(tk.Frame):
                                       initialdir='~')
 
             if len(dirname) > 0:
+                # Only use filepaths that have an supported image file extension
                 filepaths = [os.path.join(dirname, file) for file in os.listdir(dirname) if
                              file.endswith(".jpg") or file.endswith(".jpeg") or file.endswith(".png") or file.endswith(
                                  ".heif") or file.endswith(".heic")]
@@ -362,10 +360,17 @@ class SelectImagesPage(tk.Frame):
         def StartProcessing():
             if self.data:
                 selected = [element.path for element in self.data if element.selected]
+
+                # Use all images or only the selected ones
                 if selected:
                     controller.show_frame(ProcessingPages).update_images(selected)
                 else:
                     controller.show_frame(ProcessingPages).update_images([element.path for element in self.data])
+
+                # Delete images on page to allow restarting
+                for element in self.data:
+                    element.canvas.destroy()
+                self.data.clear()
 
         start_button = tk.Button(
             self,
@@ -374,23 +379,24 @@ class SelectImagesPage(tk.Frame):
         )
 
         self.grid_rowconfigure(0)
-        self.grid_rowconfigure(1)
-        self.grid_rowconfigure(2, weight=1, uniform="x")
+        self.grid_rowconfigure(1, weight=1, uniform="x")
         self.grid_rowconfigure(2)
         self.grid_columnconfigure(0, weight=1, uniform="x")
         self.grid_columnconfigure(1, weight=1, uniform="x")
 
         select_pictures_button.grid(row=0, column=0, sticky="nswe")
         select_pictures_directory_button.grid(row=0, column=1, sticky="nsew")
-        self.progressbar.grid(row=1, column=0, columnspan=2, sticky="nsew")
-        self.scroll_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
-        delete_selected_button.grid(row=3, column=0, sticky="nsew")
-        start_button.grid(row=3, column=1, sticky="nsew")
+        self.scroll_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        delete_selected_button.grid(row=2, column=0, sticky="nsew")
+        start_button.grid(row=2, column=1, sticky="nsew")
 
     def update_images(self, new_image_files):
+        '''
+        Displays images from the provided file list in a grid.
+        '''
         image_paths = list(set([element.path for element in self.data]) | set(new_image_files))
-        self.progressbar['maximum'] = len(image_paths)
-        self.progressbar['value'] = 0
+        self.controller.progressbar['maximum'] = len(image_paths)
+        self.controller.progressbar['value'] = 0
 
         for element in self.data:
             element.canvas.destroy()
@@ -398,8 +404,8 @@ class SelectImagesPage(tk.Frame):
         self.data.clear()
 
         for i, image_path in enumerate(image_paths):
-            self.progressbar['value'] += 1
-            self.progressbar.update_idletasks()
+            self.controller.progressbar['value'] += 1
+            self.controller.progressbar.update()
             canvas = tk.Canvas(self.images_frame, width=248, height=248, background='white', highlightthickness=1,
                                highlightbackground="black")
 
