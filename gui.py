@@ -1,20 +1,16 @@
 import tkinter as tk
 from tkinter import filedialog as fd
-from typing import Tuple, Dict
 from pathlib import Path
 import PIL.Image
 import PIL.ImageTk
 import PIL.ImageOps
 import PIL.ImageDraw
-import numpy as np
 import os
 import platform
-import cv2
 from pillow_heif import register_heif_opener
 from dataclasses import dataclass
 from tkinter import ttk
 import multiprocessing
-import math
 from solutions import use_hog, use_mediapipe, use_cnn, face_align_crop
 import multiprocessing.connection
 import multiprocessing.queues
