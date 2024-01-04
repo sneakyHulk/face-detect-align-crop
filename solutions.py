@@ -14,7 +14,7 @@ import cv2
 # TODO: cvlib
 
 
-def use_cnn(image: PIL.Image):
+def use_cnn(image: PIL.Image.Image):
     if not hasattr(use_cnn, "detector"):
         # print("New cnn detector!")
         use_cnn.detector = detector_cnn = dlib.cnn_face_detection_model_v1("mmod_human_face_detector.dat")
@@ -27,7 +27,7 @@ def use_cnn(image: PIL.Image):
         yield bbox.left(), bbox.top(), bbox.right(), bbox.bottom()
 
 
-def use_hog(image: PIL.Image):
+def use_hog(image: PIL.Image.Image):
     if not hasattr(use_hog, "detector"):
         # print("New hog detector!")
         use_hog.detector = dlib.get_frontal_face_detector()
@@ -40,7 +40,7 @@ def use_hog(image: PIL.Image):
         yield bbox.left(), bbox.top(), bbox.right(), bbox.bottom()
 
 
-def use_mediapipe(image: PIL.Image):
+def use_mediapipe(image: PIL.Image.Image):
     if not hasattr(use_mediapipe, "detector"):
         # print("New mediapipe detector!")
         use_mediapipe.detector = vision.FaceDetector.create_from_options(

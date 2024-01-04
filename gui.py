@@ -7,8 +7,6 @@ import PIL.ImageOps
 import PIL.ImageDraw
 import os
 import platform
-from pillow_heif import register_heif_opener
-from dataclasses import dataclass
 from tkinter import ttk
 import multiprocessing
 from solutions import use_hog, use_mediapipe, use_cnn, face_align_crop
@@ -18,7 +16,9 @@ import multiprocessing.pool
 from typing import Tuple, List
 from dataclasses import dataclass, field
 
-register_heif_opener()
+
+# from pillow_heif import register_heif_opener
+# register_heif_opener()
 
 
 class App(tk.Tk):
@@ -61,7 +61,7 @@ class App(tk.Tk):
 @dataclass
 class CanvasImageSelectedContainer:
     canvas: tk.Canvas
-    image: PIL.Image
+    image: PIL.Image.Image
     selected: bool
 
 
