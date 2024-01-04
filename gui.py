@@ -14,6 +14,9 @@ import multiprocessing
 from solutions import use_hog, use_mediapipe, use_cnn, face_align_crop
 import multiprocessing.connection
 import multiprocessing.queues
+import multiprocessing.pool
+from typing import Tuple, List
+from dataclasses import dataclass, field
 
 register_heif_opener()
 
@@ -26,7 +29,7 @@ class App(tk.Tk):
 
         # Initialize root window
         self.wm_title("FACE-DETECT-ALIGN-CROP")
-        # self.resizable(False, False)
+        self.resizable(False, False)
         self.geometry('1280x734')
         self.grid_rowconfigure(0)
         self.grid_rowconfigure(1, weight=1)
@@ -76,77 +79,26 @@ class EndPage(tk.Frame):
         self.button.pack(fill="both")
 
 
+@dataclass
+class ProcessingPageContainer:
+    image_path: str
+    result: multiprocessing.pool.AsyncResult
+    detections: List[Tuple[PIL.Image.Image, int, int, int, int]] = field(default_factory=list)
+    result_available: bool = False
+    used_mediapipe: bool = False
+    used_cnn: bool = False
+    used_hog: bool = False
+
+
 class ProcessingPage(tk.Frame):
-    def show(self):
-        detection_data = self.parent_conn.recv()
-        self.process.join()
-        for detection_image, x_start_bbox, y_start_bbox, x_end_bbox, y_end_bbox in detection_data:
-            canvas = tk.Canvas(self.images_frame, width=self.controller.output_width - 2,
-                               height=self.controller.output_height - 2, background='white', highlightthickness=1,
-                               highlightbackground="black")
-
-            canvas.img = PIL.ImageTk.PhotoImage(detection_image)
-            canvas.create_image(0, 0, image=canvas.img, anchor=tk.NW)
-
-            def select_image(selection_event):
-                for element in self.data:
-                    if selection_event.widget == element.canvas:
-                        if element.selected:
-                            element.selected = False
-                            element.canvas.configure(highlightbackground="black")
-                        else:
-                            element.selected = True
-                            element.canvas.configure(highlightbackground="green")
-                    else:
-                        element.selected = False
-                        element.canvas.configure(highlightbackground="black")
-
-            canvas.bind("<Button-1>", select_image)
-
-            canvas.grid(row=len(self.data), sticky="nsew", padx=1, pady=1)
-            if not len(self.data):
-                canvas.configure(highlightbackground="green")
-            self.data.append(CanvasImageSelectedContainer(canvas, detection_image, False if len(self.data) else True))
-            draw_img = PIL.ImageDraw.Draw(self.draw_image)
-            draw_img.rectangle(((x_start_bbox, y_start_bbox), (x_end_bbox, y_end_bbox)), outline='red',
-                               width=(self.draw_image.width + self.draw_image.height) // 1000 + 1)
-
-        @dataclass
-        class Event:
-            width: int
-            height: int
-
-        event = Event(width=self.canvas.winfo_width(), height=self.canvas.winfo_height())
-        self.onCanvasConfigure(event)
-
-    @staticmethod
-    def process_image(func, image: PIL.Image, output_width: int, output_height: int,
-                      connection: multiprocessing.connection.Connection):
-        print("Processing image...")
-        results = [(face_align_crop(image, output_width, output_height, *args), args[0], args[1], args[2], args[3])
-                   for args in func(image)]
-        print(results)
-        connection.send(results)
-        connection.close()
-
-    def __init__(self, parent, controller, image_path):
+    def __init__(self, parent, controller, image_path, detections):
         tk.Frame.__init__(self, parent)
-        self.parent = parent
-        self.controller = controller
         self.image_path = image_path
         self.image = PIL.Image.open(self.image_path)
-        self.draw_image = self.image.copy()
-
-        self.parent_conn, self.child_conn = multiprocessing.Pipe()
-        self.process = multiprocessing.Process(target=self.process_image, args=(
-            use_mediapipe, self.image, self.controller.output_width, self.controller.output_height, self.child_conn),
-                                               daemon=True)
-        self.process.start()
 
         self.data: list[CanvasImageSelectedContainer] = []
 
         self.grid_rowconfigure(0, weight=1)
-        self.grid_rowconfigure(1)
         self.grid_columnconfigure(0, weight=1, uniform="x")
         self.grid_columnconfigure(1, minsize=controller.output_width + 20)
 
@@ -158,81 +110,54 @@ class ProcessingPage(tk.Frame):
         self.images_frame = self.scroll_frame.viewPort
         self.scroll_frame.grid(row=0, column=1, sticky="nswe")
 
-        self.frame_buttons = tk.Frame(self)
-        self.frame_buttons.grid_rowconfigure(0)
-        self.frame_buttons.grid_columnconfigure(0, weight=1, uniform="x")
-        self.frame_buttons.grid_columnconfigure(1, weight=1, uniform="x")
-        self.frame_buttons.grid_columnconfigure(2, weight=1, uniform="x")
-        self.frame_buttons.grid_columnconfigure(3, weight=1, uniform="x")
+        for detection_image, x_start_bbox, y_start_bbox, x_end_bbox, y_end_bbox in detections:
+            canvas = tk.Canvas(self.images_frame, width=controller.output_width - 2,
+                               height=controller.output_height - 2, background='white', highlightthickness=1,
+                               highlightbackground="black")
 
-        print(self.image_path)
+            canvas.img = PIL.ImageTk.PhotoImage(detection_image)
+            canvas.create_image(0, 0, image=canvas.img, anchor=tk.NW)
 
-        self.button_mediapipe = tk.Button(self.frame_buttons, text="Use mediapipe")
-        self.button_mediapipe.grid(row=0, column=0, sticky="nswe")
-        self.button_mediapipe["state"] = "disabled"
+            def select_image(selection_event):
+                for element in self.data:
+                    if selection_event.widget == element.canvas:
+                        if not element.selected:
+                            element.selected = True
+                            element.canvas.configure(highlightbackground="green")
+                    else:
+                        element.selected = False
+                        element.canvas.configure(highlightbackground="black")
 
-        def hog_click():
-            self.button_hog["state"] = "disabled"
-            self.button_hog.update()
+            canvas.bind("<Button-1>", select_image)
 
-            self.parent_conn, self.child_conn = multiprocessing.Pipe()
-            self.process = multiprocessing.Process(target=self.process_image, args=(
-                use_hog, self.image, self.controller.output_width, self.controller.output_height,
-                self.child_conn), daemon=True)
-            self.process.start()
+            canvas.grid(row=len(self.data), sticky="nsew", padx=1, pady=1)
 
-            self.parent.next_frame()
-
-        self.button_hog = tk.Button(self.frame_buttons, text="Use dlib hog", command=hog_click)
-        self.button_hog.grid(row=0, column=1, sticky="nswe")
-
-        def cnn_click():
-            self.button_cnn["state"] = "disabled"
-            self.button_cnn.update()
-
-            self.parent_conn, self.child_conn = multiprocessing.Pipe()
-            self.process = multiprocessing.Process(target=self.process_image, args=(
-                use_cnn, self.image, self.controller.output_width, self.controller.output_height,
-                self.child_conn), daemon=True)
-            self.process.start()
-
-            self.parent.next_frame()
-
-        self.button_cnn = tk.Button(self.frame_buttons, text="Use dlib cnn", command=cnn_click)
-        self.button_cnn.grid(row=0, column=2, sticky="nswe")
-
-        def save_click():
-            self.button_save["state"] = "disabled"
-            self.button_save.update()
-
-            for container in self.data:
-                if container.selected:
-                    desktop = os.path.normpath(os.path.expanduser("~/Desktop"))
-                    os.makedirs(os.path.join(desktop, "ready"), exist_ok=True)
-                    container.image.save(os.path.join(desktop, "ready", Path(self.image_path).stem + str(".png")))
-                    break
-
-            self.parent.destroy_frame()
-
-        self.button_save = tk.Button(self.frame_buttons, text="save selection", command=save_click)
-        self.button_save.grid(row=0, column=3, sticky="nswe")
-
-        self.frame_buttons.grid(row=1, column=0, columnspan=2, sticky="nswe")
+            # auto select the first element
+            if not len(self.data):
+                canvas.configure(highlightbackground="green")
+            self.data.append(CanvasImageSelectedContainer(canvas, detection_image, False if len(self.data) else True))
+            draw_img = PIL.ImageDraw.Draw(self.image)
+            draw_img.rectangle(((x_start_bbox, y_start_bbox), (x_end_bbox, y_end_bbox)), outline='red',
+                               width=(
+                                             self.image.width + self.image.height) // 1000 + 1)  # scale rectangles based on the image size
 
     def onCanvasConfigure(self, event):
-        self.canvas.img = PIL.ImageOps.pad(self.draw_image, (event.width, event.height),
+        self.canvas.img = PIL.ImageOps.pad(self.image, (event.width, event.height),
                                            centering=(0.5, 0.5), color='white')
         self.canvas.img = PIL.ImageTk.PhotoImage(image=self.canvas.img)
         self.canvas.create_image(0, 0, image=self.canvas.img, anchor=tk.NW)
 
 
-@dataclass
-class FramePathContainer:
-    frame: ProcessingPage
-    image_path: str
-
-
 class ProcessingPages(tk.Frame):
+    @staticmethod
+    def process_image(func, image_path, output_width: int, output_height: int):
+        print("Processing image...")
+        image = PIL.Image.open(image_path)
+        result = [(face_align_crop(image, output_width, output_height, *args), args[0], args[1], args[2], args[3])
+                  for args in func(image)]
+
+        return result
+
     def update_images(self, image_paths):
         self.controller.progressbar['maximum'] = len(image_paths)
         self.controller.progressbar['value'] = 0
@@ -240,40 +165,125 @@ class ProcessingPages(tk.Frame):
         for image_path in image_paths:
             self.controller.progressbar['value'] += 1
             self.controller.progressbar.update()
-            page = ProcessingPage(self, self.controller, image_path)
-            self.frames.append(FramePathContainer(page, image_path))
+            result = self.pool.apply_async(func=self.process_image, args=(
+                use_mediapipe, image_path, self.controller.output_width, self.controller.output_height,))
+
+            self.frames.append(ProcessingPageContainer(image_path, result, used_mediapipe=True, result_available=True))
 
         self.show_frame()
 
     def __init__(self, parent, controller):
         tk.Frame.__init__(self, parent)
+        self.current_frame = None
         self.controller = controller
-        self.frames: list[FramePathContainer] = []
-        self.current_frame = 0
+        self.frames: list[ProcessingPageContainer] = []
+        self.current_index: int = 0
+        self.pool = multiprocessing.Pool(processes=4)
 
-        self.grid_rowconfigure(0, weight=1, uniform="y")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1)
         self.grid_columnconfigure(0, weight=1, uniform="x")
+        self.grid_columnconfigure(1, weight=1, uniform="x")
+        self.grid_columnconfigure(2, weight=1, uniform="x")
+        self.grid_columnconfigure(3, weight=1, uniform="x")
+
+        self.button_mediapipe = tk.Button(self, text="Use mediapipe")
+        self.button_mediapipe.grid(row=1, column=0, sticky="nswe")
+
+        def hog_click():
+            self.button_hog["state"] = "disabled"
+            self.button_hog.update()
+
+            self.frames[self.current_index].result = self.pool.apply_async(func=self.process_image, args=(
+                use_hog, self.frames[self.current_index].image_path, self.controller.output_width,
+                self.controller.output_height), )
+            self.frames[self.current_index].used_hog = True
+            self.frames[self.current_index].result_available = True
+
+            self.next_frame()
+
+        self.button_hog = tk.Button(self, text="Use dlib hog", command=hog_click)
+        self.button_hog.grid(row=1, column=1, sticky="nswe")
+
+        def cnn_click():
+            self.button_cnn["state"] = "disabled"
+            self.button_cnn.update()
+
+            self.frames[self.current_index].result = self.pool.apply_async(func=self.process_image, args=(
+                use_cnn, self.frames[self.current_index].image_path, self.controller.output_width,
+                self.controller.output_height), )
+            self.frames[self.current_index].used_cnn = True
+            self.frames[self.current_index].result_available = True
+
+            self.next_frame()
+
+        self.button_cnn = tk.Button(self, text="Use dlib cnn (uses much RAM careful!)", command=cnn_click)
+        self.button_cnn.grid(row=1, column=2, sticky="nswe")
+
+        def save_click():
+            self.button_save["state"] = "disabled"
+            self.button_save.update()
+
+            self.save_image()
+
+        self.button_save = tk.Button(self, text="save selection", command=save_click)
+        self.button_save.grid(row=1, column=3, sticky="nswe")
+
+        self.button_mediapipe["state"] = "disabled"
+        self.button_hog["state"] = "disabled"
+        self.button_cnn["state"] = "disabled"
+        self.button_save["state"] = "disabled"
 
     def show_frame(self):
-        frame = self.frames[self.current_frame]
-        frame.frame.grid(row=0, column=0, sticky="nsew")
-        self.controller.wm_title(frame.image_path)
-        frame.frame.show()
-        frame.frame.tkraise()
+        print(self.frames[self.current_index].image_path)
+        self.button_mediapipe["state"] = "disabled"
+        self.button_hog["state"] = "disabled"
+        self.button_cnn["state"] = "disabled"
+        self.button_save["state"] = "disabled"
+
+        if self.frames[self.current_index].result_available:
+            self.frames[self.current_index].result_available = False
+            self.frames[self.current_index].detections += self.frames[self.current_index].result.get()
+
+        data = self.frames[self.current_index]
+
+        self.current_frame = ProcessingPage(self, self.controller, data.image_path, data.detections)
+
+        self.button_mediapipe["state"] = "disabled" if data.used_mediapipe else "normal"
+        self.button_hog["state"] = "disabled" if data.used_hog else "normal"
+        self.button_cnn["state"] = "disabled" if data.used_cnn else "normal"
+        self.button_save["state"] = "normal"
+
+        self.controller.wm_title(data.image_path)
+
+        self.current_frame.grid(row=0, column=0, columnspan=4, sticky="nswe")
         self.update()
 
     def destroy_frame(self):
-        self.frames[self.current_frame].frame.destroy()
-        self.frames.pop(self.current_frame)
+        self.current_frame.destroy()
+        self.frames.pop(self.current_index)
         if len(self.frames):
-            self.current_frame = self.current_frame % len(self.frames)
+            self.current_index = self.current_index % len(self.frames)
             self.show_frame()
         else:
             self.controller.show_frame(EndPage)
 
     def next_frame(self):
-        self.current_frame = (self.current_frame + 1) % len(self.frames)
+        self.current_frame.destroy()
+        self.current_index = (self.current_index + 1) % len(self.frames)
         self.show_frame()
+
+    def save_image(self):
+        for container in self.current_frame.data:
+            if container.selected:
+                desktop = os.path.normpath(os.path.expanduser("~/Desktop"))
+                os.makedirs(os.path.join(desktop, "ready"), exist_ok=True)
+                container.image.save(os.path.join(desktop, "ready",
+                                                  Path(self.frames[self.current_index].image_path).stem + str(
+                                                      ".png")))
+                break
+
+        self.destroy_frame()
 
 
 @dataclass
@@ -298,8 +308,8 @@ class SelectImagesPage(tk.Frame):
                 ('JPEG FILES', '*.jpg'),
                 ('JPEG FILES', '*.jpeg'),
                 ('PNG FILES', '*.png'),
-                ('HEIF FILES', '*.heif'),
-                ('HEIF FILES', '*.heic'),
+                # ('HEIF FILES', '*.heif'),
+                # ('HEIF FILES', '*.heic'),
                 ('All files', '*.*')
             )
 
@@ -323,8 +333,8 @@ class SelectImagesPage(tk.Frame):
             if len(dirname) > 0:
                 # Only use filepaths that have an supported image file extension
                 filepaths = [os.path.join(dirname, file) for file in os.listdir(dirname) if
-                             file.endswith(".jpg") or file.endswith(".jpeg") or file.endswith(".png") or file.endswith(
-                                 ".heif") or file.endswith(".heic")]
+                             file.endswith(".jpg") or file.endswith(".jpeg") or file.endswith(
+                                 ".png")]  # or file.endswith(".heif") or file.endswith(".heic")]
                 self.update_images(filepaths)
 
         select_pictures_directory_button = tk.Button(

@@ -10,16 +10,16 @@ from typing import Union
 import math
 import cv2
 
-base_options = python.BaseOptions(model_asset_path='detector.tflite')
-options = vision.FaceDetectorOptions(base_options=base_options)
-detector = vision.FaceDetector.create_from_options(options)
-detector_hog = dlib.get_frontal_face_detector()
-detector_cnn = dlib.cnn_face_detection_model_v1("mmod_human_face_detector.dat")
+
+# TODO: cvlib
 
 
 def use_cnn(image: PIL.Image):
-    ###cvlib
-    detection_result = detector_cnn(np.array(image), 1)
+    if not hasattr(use_cnn, "detector"):
+        # print("New cnn detector!")
+        use_cnn.detector = detector_cnn = dlib.cnn_face_detection_model_v1("mmod_human_face_detector.dat")
+
+    detection_result = use_cnn.detector(np.array(image), 1)
 
     for detection in detection_result:
         bbox = detection.rect
@@ -28,17 +28,26 @@ def use_cnn(image: PIL.Image):
 
 
 def use_hog(image: PIL.Image):
+    if not hasattr(use_hog, "detector"):
+        # print("New hog detector!")
+        use_hog.detector = dlib.get_frontal_face_detector()
+
     gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
 
-    detection_result = detector_hog(gray, 1)
+    detection_result = use_hog.detector(gray, 1)
 
     for bbox in detection_result:
         yield bbox.left(), bbox.top(), bbox.right(), bbox.bottom()
 
 
 def use_mediapipe(image: PIL.Image):
+    if not hasattr(use_mediapipe, "detector"):
+        # print("New mediapipe detector!")
+        use_mediapipe.detector = vision.FaceDetector.create_from_options(
+            vision.FaceDetectorOptions(base_options=python.BaseOptions(model_asset_path='detector.tflite')))
+
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.asarray(image))
-    detection_result = detector.detect(mp_image)
+    detection_result = use_mediapipe.detector.detect(mp_image)
 
     for detection in detection_result.detections:
         bbox = detection.bounding_box
@@ -73,7 +82,8 @@ def use_mediapipe(image: PIL.Image):
 
 
 def face_align_crop(image: PIL.Image.Image, output_width, output_height, x_start_bbox, y_start_bbox, x_end_bbox,
-                    y_end_bbox, x_eye_left=None, y_eye_left=None, x_eye_right=None, y_eye_right=None):
+                    y_end_bbox, x_eye_left=None, y_eye_left=None, x_eye_right=None,
+                    y_eye_right=None) -> PIL.Image.Image:
     def angle_between_2_points(x1, y1, x2, y2):
         tan = (y2 - y1) / (x2 - x1)
         return np.degrees(np.arctan(tan))
