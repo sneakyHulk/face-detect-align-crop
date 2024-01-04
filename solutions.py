@@ -17,7 +17,7 @@ import cv2
 def use_cnn(image: PIL.Image.Image):
     if not hasattr(use_cnn, "detector"):
         # print("New cnn detector!")
-        use_cnn.detector = detector_cnn = dlib.cnn_face_detection_model_v1("mmod_human_face_detector.dat")
+        use_cnn.detector = detector_cnn = dlib.cnn_face_detection_model_v1("data/mmod_human_face_detector.dat")
 
     detection_result = use_cnn.detector(np.array(image), 1)
 
@@ -44,7 +44,7 @@ def use_mediapipe(image: PIL.Image.Image):
     if not hasattr(use_mediapipe, "detector"):
         # print("New mediapipe detector!")
         use_mediapipe.detector = vision.FaceDetector.create_from_options(
-            vision.FaceDetectorOptions(base_options=python.BaseOptions(model_asset_path='detector.tflite')))
+            vision.FaceDetectorOptions(base_options=python.BaseOptions(model_asset_path='data/detector.tflite')))
 
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.asarray(image))
     detection_result = use_mediapipe.detector.detect(mp_image)
