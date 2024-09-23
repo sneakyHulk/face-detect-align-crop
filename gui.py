@@ -1,4 +1,5 @@
 import tkinter as tk
+from idlelib.undo import DeleteCommand
 from tkinter import filedialog as fd
 from pathlib import Path
 import PIL.Image
@@ -24,8 +25,8 @@ from dataclasses import dataclass, field
 class App(tk.Tk):
     def __init__(self, *args, **kwargs):
         tk.Tk.__init__(self, *args, **kwargs)
-        self.output_height = 600
-        self.output_width = 600
+        self.output_height = 640
+        self.output_width = 480
 
         # Initialize root window
         self.wm_title("FACE-DETECT-ALIGN-CROP")
@@ -334,7 +335,7 @@ class SelectImagesPage(tk.Frame):
                 # Only use filepaths that have an supported image file extension
                 filepaths = [os.path.join(dirname, file) for file in os.listdir(dirname) if
                              file.endswith(".jpg") or file.endswith(".jpeg") or file.endswith(
-                                 ".png")]  # or file.endswith(".heif") or file.endswith(".heic")]
+                                 ".png") or file.endswith(".JPG") or file.endswith(".JPEG") or file.endswith(".PNG") or file.endswith(".jfif")]  # or file.endswith(".heif") or file.endswith(".heic")]
                 self.update_images(filepaths)
 
         select_pictures_directory_button = tk.Button(
@@ -346,6 +347,7 @@ class SelectImagesPage(tk.Frame):
         def DeleteSelectedImages():
             for element in [element for element in self.data if element.selected]:
                 element.canvas.destroy()
+                print("Delete image with path: ", element.path)
                 self.data.remove(element)
 
         delete_selected_button = tk.Button(
