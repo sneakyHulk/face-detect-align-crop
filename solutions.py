@@ -70,13 +70,16 @@ def use_mediapipe(image: PIL.Image.Image):
             y_px: int = min(math.floor(normalized_y * image_height), image_height - 1)
             return x_px, y_px
 
-        x_eye_left, y_eye_left = _normalized_to_pixel_coordinates(detection.keypoints[0].x,
-                                                                  detection.keypoints[0].y,
-                                                                  image.width, image.height)
+        try:
+            x_eye_left, y_eye_left = _normalized_to_pixel_coordinates(detection.keypoints[0].x,
+                                                                      detection.keypoints[0].y,
+                                                                      image.width, image.height)
 
-        x_eye_right, y_eye_right = _normalized_to_pixel_coordinates(detection.keypoints[1].x,
-                                                                    detection.keypoints[1].y,
-                                                                    image.width, image.height)
+            x_eye_right, y_eye_right = _normalized_to_pixel_coordinates(detection.keypoints[1].x,
+                                                                        detection.keypoints[1].y,
+                                                                        image.width, image.height)
+        except TypeError:
+            x_eye_left, y_eye_left, x_eye_right, y_eye_right = None, None, None, None
 
         yield bbox.origin_x, bbox.origin_y, bbox.origin_x + bbox.width + 1, bbox.origin_y + bbox.height + 1, x_eye_left, y_eye_left, x_eye_right, y_eye_right
 

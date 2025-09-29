@@ -1,5 +1,4 @@
 import tkinter as tk
-from idlelib.undo import DeleteCommand
 from tkinter import filedialog as fd
 from pathlib import Path
 import PIL.Image
@@ -25,8 +24,8 @@ from dataclasses import dataclass, field
 class App(tk.Tk):
     def __init__(self, *args, **kwargs):
         tk.Tk.__init__(self, *args, **kwargs)
-        self.output_height = 640
-        self.output_width = 480
+        self.output_height = 600
+        self.output_width = 600
 
         # Initialize root window
         self.wm_title("FACE-DETECT-ALIGN-CROP")
@@ -333,9 +332,15 @@ class SelectImagesPage(tk.Frame):
 
             if len(dirname) > 0:
                 # Only use filepaths that have an supported image file extension
-                filepaths = [os.path.join(dirname, file) for file in os.listdir(dirname) if
-                             file.endswith(".jpg") or file.endswith(".jpeg") or file.endswith(
-                                 ".png") or file.endswith(".JPG") or file.endswith(".JPEG") or file.endswith(".PNG") or file.endswith(".jfif")]  # or file.endswith(".heif") or file.endswith(".heic")]
+                filepaths = [os.path.join(dirname, filename + ext) for filename, ext in
+                             [os.path.splitext(file) for file in os.listdir(dirname)] if (
+                                     ext == ".jpg" or ext == ".jpeg" or ext == ".png" or ext == ".JPG" or ext == ".JPEG" or ext == ".PNG") and filename not in [
+                                 os.path.splitext(file)[0] for file in
+                                 os.listdir(
+                                     os.path.join(os.path.expanduser("~/Desktop"), "ready"))]]  # or ".heif" or ".heic"]
+
+                print("Number of Pictures found: ", len(filepaths))
+
                 self.update_images(filepaths)
 
         select_pictures_directory_button = tk.Button(
